@@ -14,7 +14,14 @@
 
 import AVFoundation
 import UIKit
+import AVKit
 import os
+import Photos
+import MobileCoreServices
+
+private let ONE_FRAME_DURATION = 0.03
+private var AVPlayerItemStatusContext: Int = Int()
+
 
 class ViewController: UIViewController {
   // MARK: Storyboards Connections
@@ -25,7 +32,7 @@ class ViewController: UIViewController {
   @IBOutlet weak var resumeButton: UIButton!
   @IBOutlet weak var cameraUnavailableLabel: UILabel!
 
-  @IBOutlet weak var tableView: UITableView!
+ // @IBOutlet weak var tableView: UITableView!
 
   @IBOutlet weak var threadCountLabel: UILabel!
   @IBOutlet weak var threadCountStepper: UIStepper!
@@ -34,7 +41,7 @@ class ViewController: UIViewController {
 
   // MARK: ModelDataHandler traits
   var threadCount: Int = Constants.defaultThreadCount
-  var delegate: Delegates = Constants.defaultDelegate
+  //var delegate: Delegates = Constants.defaultDelegate
 
   // MARK: Result Variables
   // Inferenced data to render.
@@ -43,17 +50,23 @@ class ViewController: UIViewController {
   // Minimum score to render the result.
   private let minimumScore: Float = 0.5
 
-  // Relative location of `overlayView` to `previewView`.
-  private var overlayViewFrame: CGRect?
-
-  private var previewViewFrame: CGRect?
-
-  // MARK: Controllers that manage functionality
-  // Handles all the camera related functionality
-  private lazy var cameraCapture = CameraFeedManager(previewView: previewView)
-
   // Handles all data preprocessing and makes calls to run inference.
   private var modelDataHandler: ModelDataHandler?
+    
+    
+    //@objc private dynamic var player: AVPlayer!
+    private var videoOutput: AVPlayerItemVideoOutput!
+    private var displayLink: CADisplayLink!
+    private var _myVideoOutputQueue: DispatchQueue!
+    private var _notificationToken: AnyObject?
+    private var _timeObserver: AnyObject?
+    
+    var imagePicker = UIImagePickerController()
+    var playCtrl = AVPlayerViewController()
+
+    var videoURL : NSURL?
+
+
 
   // MARK: View Handling Methods
   override func viewDidLoad() {
@@ -65,54 +78,196 @@ class ViewController: UIViewController {
       fatalError(error.localizedDescription)
     }
 
-    cameraCapture.delegate = self
-    tableView.delegate = self
-    tableView.dataSource = self
-
     // MARK: UI Initialization
     // Setup thread count stepper with white color.
     // https://forums.developer.apple.com/thread/121495
-    threadCountStepper.setDecrementImage(
-      threadCountStepper.decrementImage(for: .normal), for: .normal)
-    threadCountStepper.setIncrementImage(
-      threadCountStepper.incrementImage(for: .normal), for: .normal)
-    // Setup initial stepper value and its label.
-    threadCountStepper.value = Double(Constants.defaultThreadCount)
-    threadCountLabel.text = Constants.defaultThreadCount.description
 
-    // Setup segmented controller's color.
-    delegatesControl.setTitleTextAttributes(
-      [NSAttributedString.Key.foregroundColor: UIColor.lightGray],
-      for: .normal)
-    delegatesControl.setTitleTextAttributes(
-      [NSAttributedString.Key.foregroundColor: UIColor.black],
-      for: .selected)
-    // Remove existing segments to initialize it with `Delegates` entries.
-    delegatesControl.removeAllSegments()
-    Delegates.allCases.forEach { delegate in
-      delegatesControl.insertSegment(
-        withTitle: delegate.description,
-        at: delegate.rawValue,
-        animated: false)
+        
+        playCtrl.player = AVPlayer()
+        
+        // Setup CADisplayLink which will callback displayPixelBuffer: at every vsync.
+        self.displayLink = CADisplayLink(target: self, selector: #selector(ViewController.displayLinkCallback(_:)))
+        //self.displayLink.add(to: RunLoop.current, forMode: .default)
+        self.displayLink.add(to: .current, forMode: .default)
+        self.displayLink.isPaused = true
+        
+        // Setup AVPlayerItemVideoOutput with the required pixelbuffer attributes.
+        let pixBuffAttributes: [String : AnyObject] = [kCVPixelBufferPixelFormatTypeKey as String :
+            Int(kCVPixelFormatType_32BGRA) as AnyObject]
+            //Int(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange) as AnyObject]
+        self.videoOutput = AVPlayerItemVideoOutput(pixelBufferAttributes: pixBuffAttributes)
+        _myVideoOutputQueue = DispatchQueue(label: "myVideoOutputQueue", attributes: [])
+        self.videoOutput.setDelegate(self, queue: _myVideoOutputQueue)
+        playCtrl.contentOverlayView?.addSubview(overlayView)
+        //self.requestPhotoPermission()
     }
-    delegatesControl.selectedSegmentIndex = 0
-  }
-
-  override func viewWillAppear(_ animated: Bool) {
-    super.viewWillAppear(animated)
-
-    cameraCapture.checkCameraConfigurationAndStartSession()
-  }
+    
 
   override func viewWillDisappear(_ animated: Bool) {
-    cameraCapture.stopSession()
+    //cameraCapture.stopSession()
   }
 
   override func viewDidLayoutSubviews() {
-    overlayViewFrame = overlayView.frame
-    previewViewFrame = previewView.frame
-  }
+        self.overlayView.frame = playCtrl.view.frame
 
+  }
+    
+    @IBAction func selectVideo(_ sender: Any) {
+        imagePicker.sourceType = .savedPhotosAlbum
+        imagePicker.delegate = self
+        imagePicker.mediaTypes = [kUTTypeMovie as String]
+        present(imagePicker, animated: true, completion: nil)
+    }
+    
+    private func setupPlaybackForURL() {
+        /*
+        Sets up player item and adds video output to it.
+        The tracks property of an asset is loaded via asynchronous key value loading, to access the preferred transform of a video track used to orientate the video while rendering.
+        After adding the video output, we request a notification of media change in order to restart the CADisplayLink.
+        */
+        
+        // Remove video output from old item, if any.
+        playCtrl.player?.currentItem?.remove(self.videoOutput)
+        
+        let item = AVPlayerItem(url: self.videoURL as! URL)
+        let asset = item.asset
+        
+        asset.loadValuesAsynchronously(forKeys: ["tracks"]) {
+            
+            var error: NSError? = nil
+            let status = asset.statusOfValue(forKey: "tracks", error: &error)
+            if status == .loaded {
+                let tracks = asset.tracks(withMediaType: .video)
+                if !tracks.isEmpty {
+                    // Choose the first video track.
+                    let videoTrack = tracks[0]
+                    videoTrack.loadValuesAsynchronously(forKeys: ["preferredTransform"]) {
+                        
+                        if videoTrack.statusOfValue(forKey: "preferredTransform", error: nil) == .loaded {
+                            let preferredTransform = videoTrack.preferredTransform
+                            
+                            DispatchQueue.main.async {
+                                item.add(self.videoOutput)
+                                self.playCtrl.player?.replaceCurrentItem(with: item)
+                                self.videoOutput.requestNotificationOfMediaDataChange(withAdvanceInterval: ONE_FRAME_DURATION)
+                                
+                                self.playCtrl.player?.play()
+                            }
+                            
+                        }
+                        
+                    }
+                }
+            } else {
+                print(status, error ?? "url Playback setup error")
+            }
+            
+        }
+        
+    }
+    
+    private func stopLoadingAnimationAndHandleError(_ error: NSError?) {
+        guard let error = error else {return}
+        let cancelButtonTitle =  NSLocalizedString("OK", comment: "Cancel button title for animation load error")
+        if #available(iOS 8.0, *) {
+            let alertController = UIAlertController(title: error.localizedDescription, message: error.localizedFailureReason, preferredStyle: .alert)
+            let action = UIAlertAction(title: cancelButtonTitle, style: .cancel, handler: nil)
+            alertController.addAction(action)
+            self.present(alertController, animated: true, completion: nil)
+        } else {
+            let alertView = UIAlertView(title: error.localizedDescription, message: error.localizedFailureReason, delegate: nil, cancelButtonTitle: cancelButtonTitle)
+            alertView.show()
+        }
+    }
+
+     //MARK: - CADisplayLink Callback
+     
+     @objc func displayLinkCallback(_ sender: CADisplayLink) {
+         /*
+         The callback gets called once every Vsync.
+         Using the display link's timestamp and duration we can compute the next time the screen will be refreshed, and copy the pixel buffer for that time
+         This pixel buffer can then be processed and later rendered on screen.
+         */
+         var outputItemTime = CMTime.invalid
+         
+         // Calculate the nextVsync time which is when the screen will be refreshed next.
+         let nextVSync = (sender.timestamp + sender.duration)
+         
+         outputItemTime = self.videoOutput.itemTime(forHostTime: nextVSync)
+         
+         if self.videoOutput.hasNewPixelBuffer(forItemTime: outputItemTime) {
+            let pixelBuffer = self.videoOutput.copyPixelBuffer(forItemTime: outputItemTime, itemTimeForDisplay: nil)!
+             
+            runModel(on: pixelBuffer)
+             
+         }
+     }
+    
+      @objc func runModel(on pixelBuffer: CVPixelBuffer) {
+        let previewViewFrame = playCtrl.view.frame
+
+        // get the transformation between pixelbuffer and preview view
+        
+        overlayView.overlayTransform  = pixelBuffer.size.transformKeepAspect(toFitIn: previewViewFrame.size)
+        
+        let height = CVPixelBufferGetHeight(pixelBuffer)
+        let width = CVPixelBufferGetWidth(pixelBuffer)
+        
+        let modelInputRange = CGRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height));
+        
+        // Run PoseNet model.
+        guard
+          let (result, times) = self.modelDataHandler?.runPoseNet(
+            on: pixelBuffer,
+            from: modelInputRange,
+            to: modelInputRange.size)
+        else {
+          os_log("Cannot get inference result.", type: .error)
+          return
+        }
+
+        // Udpate `inferencedData` to render data in `tableView`.
+        inferencedData = InferencedData(score: result.score, times: times)
+        // Draw result.
+        DispatchQueue.main.async {
+    //      self.tableView.reloadData()
+          // If score is too low, clear result remaining in the overlayView.
+          if result.score < self.minimumScore {
+            self.clearResult()
+            return
+          }
+          self.drawResult(of: result)
+        }
+      }
+
+      func drawResult(of result: Result) {
+        self.overlayView.dots = result.dots
+        self.overlayView.lines = result.lines
+        self.overlayView.setNeedsDisplay()
+      }
+
+      func clearResult() {
+        self.overlayView.clear()
+        self.overlayView.setNeedsDisplay()
+      }
+
+    //### We need an explicit authorization to access properties of assets in Photos.
+     private func requestPhotoPermission() {
+         let status = PHPhotoLibrary.authorizationStatus()
+         switch status {
+         case .authorized:
+             return
+         case .denied:
+             return
+         case .notDetermined, .restricted:
+             PHPhotoLibrary.requestAuthorization {newStatus in
+                 //Do nothing as for now...
+             }
+         @unknown default:
+             break
+         }
+     }
+    
   // MARK: Button Actions
   @IBAction func didChangeThreadCount(_ sender: UIStepper) {
     let changedCount = Int(sender.value)
@@ -121,7 +276,7 @@ class ViewController: UIViewController {
     }
 
     do {
-      modelDataHandler = try ModelDataHandler(threadCount: changedCount, delegate: delegate)
+      modelDataHandler = try ModelDataHandler(threadCount: changedCount)
     } catch let error {
       fatalError(error.localizedDescription)
     }
@@ -139,20 +294,8 @@ class ViewController: UIViewController {
     } catch let error {
       fatalError(error.localizedDescription)
     }
-    delegate = changedDelegate
-    os_log("Delegate is changed to: %s", delegate.description)
-  }
-
-  @IBAction func didTapResumeButton(_ sender: Any) {
-    cameraCapture.resumeInterruptedSession { complete in
-
-      if complete {
-        self.resumeButton.isHidden = true
-        self.cameraUnavailableLabel.isHidden = true
-      } else {
-        self.presentUnableToResumeSessionAlert()
-      }
-    }
+    //delegate = changedDelegate
+    os_log("Delegate is changed to: ")
   }
 
   func presentUnableToResumeSessionAlert() {
@@ -167,175 +310,36 @@ class ViewController: UIViewController {
   }
 }
 
-// MARK: - CameraFeedManagerDelegate Methods
-extension ViewController: CameraFeedManagerDelegate {
-  func cameraFeedManager(_ manager: CameraFeedManager, didOutput pixelBuffer: CVPixelBuffer) {
-    runModel(on: pixelBuffer)
-  }
 
-  // MARK: Session Handling Alerts
-  func cameraFeedManagerDidEncounterSessionRunTimeError(_ manager: CameraFeedManager) {
-    // Handles session run time error by updating the UI and providing a button if session can be
-    // manually resumed.
-    self.resumeButton.isHidden = false
-  }
+//MARK: - AVPlayerItemOutputPullDelegate
 
-  func cameraFeedManager(
-    _ manager: CameraFeedManager, sessionWasInterrupted canResumeManually: Bool
-  ) {
-    // Updates the UI when session is interupted.
-    if canResumeManually {
-      self.resumeButton.isHidden = false
-    } else {
-      self.cameraUnavailableLabel.isHidden = false
-    }
-  }
-
-  func cameraFeedManagerDidEndSessionInterruption(_ manager: CameraFeedManager) {
-    // Updates UI once session interruption has ended.
-    self.cameraUnavailableLabel.isHidden = true
-    self.resumeButton.isHidden = true
-  }
-
-  func presentVideoConfigurationErrorAlert(_ manager: CameraFeedManager) {
-    let alertController = UIAlertController(
-      title: "Confirguration Failed", message: "Configuration of camera has failed.",
-      preferredStyle: .alert)
-    let okAction = UIAlertAction(title: "OK", style: .cancel, handler: nil)
-    alertController.addAction(okAction)
-
-    present(alertController, animated: true, completion: nil)
-  }
-
-  func presentCameraPermissionsDeniedAlert(_ manager: CameraFeedManager) {
-    let alertController = UIAlertController(
-      title: "Camera Permissions Denied",
-      message:
-        "Camera permissions have been denied for this app. You can change this by going to Settings",
-      preferredStyle: .alert)
-
-    let cancelAction = UIAlertAction(title: "Cancel", style: .cancel, handler: nil)
-    let settingsAction = UIAlertAction(title: "Settings", style: .default) { action in
-      if let url = URL.init(string: UIApplication.openSettingsURLString) {
-        UIApplication.shared.open(url, options: [:], completionHandler: nil)
-      }
+extension ViewController: AVPlayerItemOutputPullDelegate {
+    func outputMediaDataWillChange(_ sender: AVPlayerItemOutput) {
+        // Restart display link.
+        self.displayLink.isPaused = false
     }
 
-    alertController.addAction(cancelAction)
-    alertController.addAction(settingsAction)
-
-    present(alertController, animated: true, completion: nil)
-  }
-
-  @objc func runModel(on pixelBuffer: CVPixelBuffer) {
-    guard let overlayViewFrame = overlayViewFrame, let previewViewFrame = previewViewFrame
-    else {
-      return
-    }
-    // To put `overlayView` area as model input, transform `overlayViewFrame` following transform
-    // from `previewView` to `pixelBuffer`. `previewView` area is transformed to fit in
-    // `pixelBuffer`, because `pixelBuffer` as a camera output is resized to fill `previewView`.
-    // https://developer.apple.com/documentation/avfoundation/avlayervideogravity/1385607-resizeaspectfill
-    let modelInputRange = overlayViewFrame.applying(
-      previewViewFrame.size.transformKeepAspect(toFitIn: pixelBuffer.size))
-
-    // Run PoseNet model.
-    guard
-      let (result, times) = self.modelDataHandler?.runPoseNet(
-        on: pixelBuffer,
-        from: modelInputRange,
-        to: overlayViewFrame.size)
-    else {
-      os_log("Cannot get inference result.", type: .error)
-      return
-    }
-
-    // Udpate `inferencedData` to render data in `tableView`.
-    inferencedData = InferencedData(score: result.score, times: times)
-
-    // Draw result.
-    DispatchQueue.main.async {
-      self.tableView.reloadData()
-      // If score is too low, clear result remaining in the overlayView.
-      if result.score < self.minimumScore {
-        self.clearResult()
-        return
-      }
-      self.drawResult(of: result)
-    }
-  }
-
-  func drawResult(of result: Result) {
-    self.overlayView.dots = result.dots
-    self.overlayView.lines = result.lines
-    self.overlayView.setNeedsDisplay()
-  }
-
-  func clearResult() {
-    self.overlayView.clear()
-    self.overlayView.setNeedsDisplay()
-  }
 }
 
-// MARK: - TableViewDelegate, TableViewDataSource Methods
-extension ViewController: UITableViewDelegate, UITableViewDataSource {
-  func numberOfSections(in tableView: UITableView) -> Int {
-    return InferenceSections.allCases.count
-  }
+extension ViewController: UIImagePickerControllerDelegate {
+    public func imagePickerController(_ picker: UIImagePickerController,
+    didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]) {
+        
+        self.videoURL = info[UIImagePickerController.InfoKey.mediaURL] as? NSURL
 
-  func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-    guard let section = InferenceSections(rawValue: section) else {
-      return 0
+        self.dismiss(animated: true, completion: nil)
+        present(playCtrl, animated: true, completion: nil)
+        setupPlaybackForURL()
+
     }
-
-    return section.subcaseCount
-  }
-
-  func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
-    let cell = tableView.dequeueReusableCell(withIdentifier: "InfoCell") as! InfoCell
-    guard let section = InferenceSections(rawValue: indexPath.section) else {
-      return cell
+    
+    public func imagePickerControllerDidCancel(_ picker: UIImagePickerController){
+        self.dismiss(animated: true, completion: nil)
     }
-    guard let data = inferencedData else { return cell }
+}
 
-    var fieldName: String
-    var info: String
-
-    switch section {
-    case .Score:
-      fieldName = section.description
-      info = String(format: "%.3f", data.score)
-    case .Time:
-      guard let row = ProcessingTimes(rawValue: indexPath.row) else {
-        return cell
-      }
-      var time: Double
-      switch row {
-      case .InferenceTime:
-        time = data.times.inference
-      }
-      fieldName = row.description
-      info = String(format: "%.2fms", time)
-    }
-
-    cell.fieldNameLabel.text = fieldName
-    cell.infoLabel.text = info
-
-    return cell
-  }
-
-  func tableView(_ tableView: UITableView, heightForRowAt indexPath: IndexPath) -> CGFloat {
-    guard let section = InferenceSections(rawValue: indexPath.section) else {
-      return 0
-    }
-
-    var height = Traits.normalCellHeight
-    if indexPath.row == section.subcaseCount - 1 {
-      height = Traits.separatorCellHeight + Traits.bottomSpacing
-    }
-    return height
-  }
-
+extension ViewController: UINavigationControllerDelegate {
+    //empty implementation
 }
 
 // MARK: - Private enums
@@ -344,6 +348,7 @@ fileprivate enum Traits {
   static let normalCellHeight: CGFloat = 35.0
   static let separatorCellHeight: CGFloat = 25.0
   static let bottomSpacing: CGFloat = 30.0
+    
 }
 
 fileprivate struct InferencedData {
