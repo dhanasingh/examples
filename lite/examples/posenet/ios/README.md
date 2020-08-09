@@ -23,6 +23,9 @@ joints are.
 
 ![Structure diagram](https://storage.googleapis.com/download.tensorflow.org/models/tflite/screenshots/posenet_ios_diagram.png)
 
+![Structure diagram]structure.png)
+
+
 #### Preprocessing
 While preprocessing, it converts video input image to satisfy the model input
 specification. It crops the original image to have the same aspect ratio as the
