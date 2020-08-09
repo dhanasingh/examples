@@ -1,19 +1,18 @@
-# Tensorflow Lite PoseNet iOS Example Application
+# Tensorflow Lite PoseNet iOS Example Application with Videos
 
 ![Demo image](https://storage.googleapis.com/download.tensorflow.org/models/tflite/screenshots/posenet_ios_demo.gif)
 
 ## Overview
-This is an on-device camera app that continuously detects the key points of a
-person in real-time with the camera activity using the
+This app continuously detects the key points of a
+person in real-time with the video selected from the photo library using the
 [Pose Estimation model][posenet-model]. Key point of a person means a point
 needed to build a skeleton of the person, such as shoulders, elbows, knees, etc.
 
-Application extracts the largest image with the same aspect ratio to model input
-size. You can find the extracted area in the display, as the removed area is
-shaded. The result is rendered when the total inference score is higher than
+Application extracts the image with the same aspect ratio to model input
+size (257X257). You can find the extracted area in the display. The result is rendered when the total inference score is higher than
 `0.5`.
 
-Camera captures are discarded immediately after use, nothing is stored or saved.
+Video frames are discarded immediately after use, nothing is stored or saved.
 
 ### Model used
 [Pose Estimation model][posenet-model] is a vision model that can be used to
@@ -25,7 +24,7 @@ joints are.
 ![Structure diagram](https://storage.googleapis.com/download.tensorflow.org/models/tflite/screenshots/posenet_ios_diagram.png)
 
 #### Preprocessing
-While preprocessing, it converts camera input image to satisfy the model input
+While preprocessing, it converts video input image to satisfy the model input
 specification. It crops the original image to have the same aspect ratio as the
 model input size. After that it resizes the cropped image to the model input
 size, and converts it to the required data type.
@@ -40,7 +39,7 @@ to display, along with the total confidence score. Total confidence score is the
 average of all the key points' confidence scores. Coordinates of the key points
 are calculated from the heat and the offset tensors. These coordinates are based
 on the model input size, which implies that you should transform each coordinate
-to match the display view size of key points. As the display view size of this
+to match the video frame size of key points. As the video frame size of this
 application is different from model input size, it transforms the points. With
 the transformed dots, the skeleton of a person can be drawn by connecting the
 dots between adjacent joints.
