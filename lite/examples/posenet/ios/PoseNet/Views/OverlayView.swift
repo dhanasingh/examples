@@ -19,6 +19,7 @@ class OverlayView: UIView {
 
   var dots = [CGPoint]()
   var lines = [Line]()
+  var overlayTransform: CGAffineTransform?
 
   override func draw(_ rect: CGRect) {
     for dot in dots {
@@ -30,9 +31,12 @@ class OverlayView: UIView {
   }
 
   func drawDot(of dot: CGPoint) {
+    
+    let dot1 = dot.applying(overlayTransform!)
     let dotRect = CGRect(
-      x: dot.x - Traits.dot.radius / 2, y: dot.y - Traits.dot.radius / 2,
+        x: dot1.x - Traits.dot.radius / 2, y: dot1.y - Traits.dot.radius / 2,
       width: Traits.dot.radius, height: Traits.dot.radius)
+
     let dotPath = UIBezierPath(ovalIn: dotRect)
 
     Traits.dot.color.setFill()
@@ -41,8 +45,9 @@ class OverlayView: UIView {
 
   func drawLine(of line: Line) {
     let linePath = UIBezierPath()
-    linePath.move(to: CGPoint(x: line.from.x, y: line.from.y))
-    linePath.addLine(to: CGPoint(x: line.to.x, y: line.to.y))
+    linePath.move(to: CGPoint(x: line.from.x, y: line.from.y).applying(overlayTransform!))
+    linePath.addLine(to: CGPoint(x: line.to.x, y: line.to.y).applying(overlayTransform!))
+
     linePath.close()
 
     linePath.lineWidth = Traits.line.width
