@@ -38,5 +38,8 @@
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
 	</array>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>This app will use photo library to estimate the pose the user shows.</string>
+
 </dict>
 </plist>
