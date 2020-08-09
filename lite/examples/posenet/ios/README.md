@@ -21,8 +21,6 @@ joints are.
 
 ### Structure
 
-![Structure diagram](https://storage.googleapis.com/download.tensorflow.org/models/tflite/screenshots/posenet_ios_diagram.png)
-
 ![Structure diagram](structure.png)
 
 
